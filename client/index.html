@@ -57,7 +57,7 @@
   svg text { font-family: inherit; }
   #tooltip { position: fixed; pointer-events: none; background: var(--surface-1); color: var(--text-primary);
     border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; font-size: 12px; display: none;
-    box-shadow: 0 2px 8px rgba(0,0,0,.18); z-index: 10; max-width: 340px; }
+    box-shadow: 0 4px 14px rgba(0,0,0,.45); z-index: 10; max-width: 340px; }
   table { border-collapse: collapse; width: 100%; font-size: 12px; }
   th { text-align: left; color: var(--muted); font-weight: 500; padding: 6px 10px; border-bottom: 1px solid var(--grid); }
   td { padding: 6px 10px; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
@@ -124,8 +124,10 @@
       <th>job</th><th>status</th><th>queue wait (ms)</th><th>first chunk (ms)</th><th>chunks</th><th>stream (ms)</th><th>avg gap (ms)</th>
     </tr></thead><tbody></tbody></table>
   </section>
+  <!-- inside .viz-root so the palette custom properties resolve (position:fixed
+       still anchors to the viewport — .viz-root creates no containing block) -->
+  <div id="tooltip"></div>
 </div>
-<div id="tooltip"></div>
 
 <script>
 "use strict";
