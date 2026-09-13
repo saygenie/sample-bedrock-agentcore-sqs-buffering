@@ -87,17 +87,27 @@ rate limit, AppSync Events API), and writes endpoints to
 
 ## Run the demo
 
-Open `client/index.html` in a browser (no build step):
+```bash
+pip install -r tests/requirements.txt   # boto3 + urllib3 for the local server
+python3 client/serve.py                 # http://127.0.0.1:8765
+```
 
-1. Paste the contents of `outputs/stack-outputs.local.json` into the outputs box.
-2. Paste temporary credentials (`aws configure export-credentials --format env`).
-   They stay in page memory only.
-3. Submit a burst of mock jobs (deterministic, zero model cost) or real LLM jobs.
-4. Watch the timeline: rows start in concurrency-limit waves; each row's chunk
+`client/serve.py` serves the page, auto-configures it from the stack outputs,
+and signs ingest calls with your local AWS credentials — nothing to paste and
+no credentials ever enter the browser. Then:
+
+1. Submit a burst of mock jobs (deterministic, zero model cost) or real LLM jobs.
+2. Watch the timeline: rows start in concurrency-limit waves; each row's chunk
    dots advance at the agent's own cadence; throttled rows show a warning marker
    and simply start late.
-5. Press **Drop connection** mid-stream, then **Reconnect & recover** to fetch
+3. Press **Drop connection** mid-stream, then **Reconnect & recover** to fetch
    the finished result from the job store.
+
+Alternatively the page also works as a plain static file (open
+`client/index.html` directly, no local server): paste the contents of
+`outputs/stack-outputs.local.json` plus temporary credentials
+(`aws configure export-credentials --format env`) into the Connection form —
+they stay in page memory only.
 
 ## Run the acceptance tests
 

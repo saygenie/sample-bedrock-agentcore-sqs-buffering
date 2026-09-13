@@ -73,19 +73,22 @@
 
   <section>
     <h2>Connection</h2>
+    <div id="proxyNote" class="note" style="display:none">✅ Local demo server detected — endpoints auto-configured;
+      ingest calls are signed by <code>client/serve.py</code> with your local AWS credentials. Nothing to enter here.</div>
     <div class="grid">
-      <div><label>Stack outputs JSON (paste to fill everything)</label><textarea id="outputsPaste" rows="2" placeholder='{"AgentCoreSqsBuffering": {...}}'></textarea></div>
+      <div class="manual-only"><label>Stack outputs JSON (paste to fill everything)</label><textarea id="outputsPaste" rows="2" placeholder='{"AgentCoreSqsBuffering": {...}}'></textarea></div>
       <div><label>Ingest endpoint</label><input id="ingestEndpoint" placeholder="https://xxx.execute-api.us-west-2.amazonaws.com"></div>
       <div><label>Region</label><input id="region" value="us-west-2"></div>
       <div><label>Events HTTP domain</label><input id="eventsHttp" placeholder="xxx.appsync-api.us-west-2.amazonaws.com"></div>
       <div><label>Events realtime domain</label><input id="eventsRealtime" placeholder="xxx.appsync-realtime-api.us-west-2.amazonaws.com"></div>
       <div><label>Events API key</label><input id="apiKey" placeholder="da2-..."></div>
-      <div><label>AWS access key id</label><input id="akid" autocomplete="off"></div>
-      <div><label>AWS secret access key</label><input id="secret" type="password" autocomplete="off"></div>
-      <div><label>AWS session token (if temporary creds)</label><input id="token" type="password" autocomplete="off"></div>
+      <div class="manual-only"><label>AWS access key id</label><input id="akid" autocomplete="off"></div>
+      <div class="manual-only"><label>AWS secret access key</label><input id="secret" type="password" autocomplete="off"></div>
+      <div class="manual-only"><label>AWS session token (if temporary creds)</label><input id="token" type="password" autocomplete="off"></div>
     </div>
-    <div class="note">Credentials stay in this page's memory only (never persisted). Get temporary ones with
-      <code>aws configure export-credentials --format env</code>.</div>
+    <div class="note manual-only">Credentials stay in this page's memory only (never persisted). Get temporary ones with
+      <code>aws configure export-credentials --format env</code>. Tip: run <code>python3 client/serve.py</code>
+      instead to skip credential entry entirely.</div>
   </section>
 
   <section>
@@ -136,6 +139,30 @@ const $ = (id) => document.getElementById(id);
 const cfgIds = ["ingestEndpoint","region","eventsHttp","eventsRealtime","apiKey"];
 cfgIds.forEach(id => { $(id).value = localStorage.getItem("demo:"+id) || $(id).value;
   $(id).addEventListener("change", () => localStorage.setItem("demo:"+id, $(id).value)); });
+
+// When served by client/serve.py, /api/config auto-configures everything and
+// the local server signs ingest calls — no credentials in the browser.
+let proxyMode = false;
+(async () => {
+  try {
+    const r = await fetch("/api/config");
+    if (!r.ok) return;
+    const c = await r.json();
+    $("ingestEndpoint").value = c.IngestEndpoint; $("region").value = c.Region;
+    $("eventsHttp").value = c.EventsHttpDomain; $("eventsRealtime").value = c.EventsRealtimeDomain;
+    $("apiKey").value = c.EventsApiKey;
+    proxyMode = true;
+    document.querySelectorAll(".manual-only").forEach(el => el.style.display = "none");
+    $("proxyNote").style.display = "block";
+  } catch { /* plain static hosting: manual mode */ }
+})();
+
+async function apiCall(method, path, body) {
+  if (proxyMode) {
+    return fetch("/api" + path, { method, headers: { "content-type": "application/json" }, body: body || undefined });
+  }
+  return sigv4Fetch(method, $("ingestEndpoint").value.trim().replace(/\/$/, "") + path, body);
+}
 
 $("outputsPaste").addEventListener("change", () => {
   try {
@@ -225,7 +252,7 @@ async function submitJobs() {
       record(id, Date.now(), "submitted", "submitted");
       const body = JSON.stringify({ jobId: id, prompt: $("prompt").value, mock,
         mockChunks: parseInt($("mockChunks").value, 10), mockIntervalMs: parseInt($("mockInterval").value, 10) });
-      const r = await sigv4Fetch("POST", $("ingestEndpoint").value.trim().replace(/\/$/, "") + "/jobs", body);
+      const r = await apiCall("POST", "/jobs", body);
       if (!r.ok) { record(id, Date.now(), "error", `submit failed ${r.status}`); jobs.get(id).stats.status = "SUBMIT_FAILED"; }
     }));
   } catch (e) { alert(e.message); }
@@ -265,7 +292,7 @@ $("recoverBtn").onclick = async () => {
   await connectWs();
   for (const [jobId, j] of jobs) {
     if (j.stats.status !== "COMPLETED") await subscribe(jobId).catch(() => {});
-    const r = await sigv4Fetch("GET", $("ingestEndpoint").value.trim().replace(/\/$/, "") + "/jobs/" + jobId, "");
+    const r = await apiCall("GET", "/jobs/" + jobId, "");
     if (r.ok) {
       const item = await r.json();
       if (item.status === "COMPLETED" && j.stats.status !== "COMPLETED") {

@@ -83,16 +83,25 @@ export AWS_REGION=us-west-2
 
 ## 데모 실행
 
-브라우저에서 `client/index.html`을 연다 (빌드 과정 없음):
+```bash
+pip install -r tests/requirements.txt   # 로컬 서버용 boto3 + urllib3
+python3 client/serve.py                 # http://127.0.0.1:8765
+```
 
-1. `outputs/stack-outputs.local.json`의 내용을 outputs 입력란에 붙여넣는다.
-2. 임시 자격증명(`aws configure export-credentials --format env`)을 붙여넣는다.
-   자격증명은 페이지 메모리에만 머문다.
-3. 모의 잡(결정적, 모델 비용 0) 또는 실제 LLM 잡을 버스트로 제출한다.
-4. 타임라인을 관찰한다: 행들이 동시성 한도 웨이브로 시작되고, 각 행의 청크 점들이
+`client/serve.py`가 페이지를 서빙하면서 스택 outputs로 자동 구성하고, 수신 API 호출을
+로컬 AWS 자격증명으로 대신 서명한다 — 붙여넣을 것이 없고 자격증명은 브라우저에 절대
+들어가지 않는다. 이후:
+
+1. 모의 잡(결정적, 모델 비용 0) 또는 실제 LLM 잡을 버스트로 제출한다.
+2. 타임라인을 관찰한다: 행들이 동시성 한도 웨이브로 시작되고, 각 행의 청크 점들이
    에이전트 고유의 리듬으로 전진하며, 스로틀된 행은 경고 마커와 함께 그저 늦게 시작한다.
-5. 스트림 도중 **Drop connection**을 누른 뒤 **Reconnect & recover**로 잡 저장소에서
+3. 스트림 도중 **Drop connection**을 누른 뒤 **Reconnect & recover**로 잡 저장소에서
    완료된 결과를 가져온다.
+
+대안으로, 이 페이지는 순수 정적 파일로도 동작한다(로컬 서버 없이 `client/index.html`을
+직접 열기): `outputs/stack-outputs.local.json` 내용과 임시 자격증명
+(`aws configure export-credentials --format env`)을 Connection 폼에 붙여넣으면 되고,
+값들은 페이지 메모리에만 머문다.
 
 ## 수용 테스트 실행
 
