@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SQS-buffered AgentCore streaming demo</title>
+<style>
+  .viz-root {
+    color-scheme: light;
+    --surface-1: #fcfcfb;
+    --page: #f9f9f7;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --muted: #898781;
+    --grid: #e1e0d9;
+    --baseline: #c3c2b7;
+    --border: rgba(11,11,11,0.10);
+    --series-chunk: #2a78d6;   /* categorical slot 1: chunk arrivals */
+    --status-good: #0ca30c;    /* completed */
+    --status-warning: #fab219; /* throttled (shape+label carry meaning too) */
+    --status-critical: #d03b3b;/* error */
+    --status-neutral: #898781; /* submitted */
+    --status-start: #52514e;   /* stream started */
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --surface-1: #1a1a19;
+      --page: #0d0d0d;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --muted: #898781;
+      --grid: #2c2c2a;
+      --baseline: #383835;
+      --border: rgba(255,255,255,0.10);
+      --series-chunk: #3987e5;
+    }
+  }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .viz-root { background: var(--page); color: var(--text-primary); min-height: 100vh; padding: 24px; box-sizing: border-box; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--text-secondary); font-size: 13px; margin-bottom: 20px; }
+  section { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-secondary); margin: 0 0 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
+  label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+  input, textarea, select { width: 100%; box-sizing: border-box; padding: 6px 8px; font: inherit; font-size: 12px;
+    background: var(--page); color: var(--text-primary); border: 1px solid var(--border); border-radius: 6px; }
+  button { font: inherit; font-size: 13px; padding: 7px 14px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--series-chunk); color: #fff; cursor: pointer; }
+  button.ghost { background: transparent; color: var(--text-primary); }
+  button:disabled { opacity: .45; cursor: default; }
+  .row { display: flex; gap: 8px; align-items: end; flex-wrap: wrap; margin-top: 12px; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .chartwrap { overflow-x: auto; }
+  svg text { font-family: inherit; }
+  #tooltip { position: fixed; pointer-events: none; background: var(--surface-1); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; font-size: 12px; display: none;
+    box-shadow: 0 2px 8px rgba(0,0,0,.18); z-index: 10; max-width: 340px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 6px 10px; border-bottom: 1px solid var(--grid); }
+  td { padding: 6px 10px; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
+  td.status { font-variant-numeric: normal; }
+  .note { font-size: 12px; color: var(--text-secondary); margin-top: 8px; }
+  code { font-size: 11px; background: var(--page); padding: 1px 4px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<div class="viz-root">
+  <h1>SQS-buffered AgentCore streaming demo</h1>
+  <div class="sub">Jobs are buffered in SQS on the request path, yet every chunk streams to this page in real time on the response path. Watch chunks arrive <em>progressively</em>, and throttles surface only as status + delay.</div>
+
+  <section>
+    <h2>Connection</h2>
+    <div class="grid">
+      <div><label>Stack outputs JSON (paste to fill everything)</label><textarea id="outputsPaste" rows="2" placeholder='{"AgentCoreSqsBuffering": {...}}'></textarea></div>
+      <div><label>Ingest endpoint</label><input id="ingestEndpoint" placeholder="https://xxx.execute-api.us-west-2.amazonaws.com"></div>
+      <div><label>Region</label><input id="region" value="us-west-2"></div>
+      <div><label>Events HTTP domain</label><input id="eventsHttp" placeholder="xxx.appsync-api.us-west-2.amazonaws.com"></div>
+      <div><label>Events realtime domain</label><input id="eventsRealtime" placeholder="xxx.appsync-realtime-api.us-west-2.amazonaws.com"></div>
+      <div><label>Events API key</label><input id="apiKey" placeholder="da2-..."></div>
+      <div><label>AWS access key id</label><input id="akid" autocomplete="off"></div>
+      <div><label>AWS secret access key</label><input id="secret" type="password" autocomplete="off"></div>
+      <div><label>AWS session token (if temporary creds)</label><input id="token" type="password" autocomplete="off"></div>
+    </div>
+    <div class="note">Credentials stay in this page's memory only (never persisted). Get temporary ones with
+      <code>aws configure export-credentials --format env</code>.</div>
+  </section>
+
+  <section>
+    <h2>Submit jobs</h2>
+    <div class="grid">
+      <div><label>Mode</label><select id="mode"><option value="mock">mock streaming (deterministic, no LLM cost)</option><option value="real">real LLM</option></select></div>
+      <div><label>Prompt (real mode)</label><input id="prompt" value="Why can queueing and streaming coexist?"></div>
+      <div><label>Mock chunks</label><input id="mockChunks" type="number" value="20"></div>
+      <div><label>Mock interval (ms)</label><input id="mockInterval" type="number" value="250"></div>
+      <div><label>Jobs to submit</label><select id="jobCount"><option>1</option><option>5</option><option selected>10</option><option>20</option></select></div>
+    </div>
+    <div class="row">
+      <button id="submitBtn">Submit burst</button>
+      <button id="dropBtn" class="ghost">Drop connection (recovery demo)</button>
+      <button id="recoverBtn" class="ghost" disabled>Reconnect &amp; recover</button>
+      <button id="clearBtn" class="ghost">Clear</button>
+      <span id="connState" class="note"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Chunk arrivals per job — wall-clock time →</h2>
+    <div class="legend" id="legend"></div>
+    <div class="chartwrap"><svg id="chart" role="img" aria-label="Timeline of chunk arrivals per job"></svg></div>
+    <div class="note">Each row is one job. A tight burst enters the queue at once; rows <em>start</em> in waves of the
+      consumer concurrency limit, and each row's dots advance steadily — that spacing is the agent's own emission
+      cadence surviving the whole pipeline. A throttled job shows a warning marker, then simply starts later.</div>
+  </section>
+
+  <section>
+    <h2>Per-job measurements</h2>
+    <table id="jobsTable"><thead><tr>
+      <th>job</th><th>status</th><th>queue wait (ms)</th><th>first chunk (ms)</th><th>chunks</th><th>stream (ms)</th><th>avg gap (ms)</th>
+    </tr></thead><tbody></tbody></table>
+  </section>
+</div>
+<div id="tooltip"></div>
+
+<script>
+"use strict";
+// ---------- state ----------
+const jobs = new Map();       // jobId -> {row, events:[{t, kind, label}], stats}
+let t0 = null;                // chart epoch (first submit)
+let ws = null, wsReady = false, subs = new Map(), pendingSubs = new Map();
+let dropped = false;
+
+const $ = (id) => document.getElementById(id);
+const cfgIds = ["ingestEndpoint","region","eventsHttp","eventsRealtime","apiKey"];
+cfgIds.forEach(id => { $(id).value = localStorage.getItem("demo:"+id) || $(id).value;
+  $(id).addEventListener("change", () => localStorage.setItem("demo:"+id, $(id).value)); });
+
+$("outputsPaste").addEventListener("change", () => {
+  try {
+    const parsed = JSON.parse($("outputsPaste").value);
+    const o = parsed.AgentCoreSqsBuffering || parsed;
+    const set = (id, v) => { if (v) { $(id).value = v; localStorage.setItem("demo:"+id, v); } };
+    set("ingestEndpoint", o.IngestEndpoint); set("eventsHttp", o.EventsHttpDomain);
+    set("eventsRealtime", o.EventsRealtimeDomain); set("apiKey", o.EventsApiKey);
+  } catch (e) { alert("Could not parse outputs JSON: " + e.message); }
+});
+
+// ---------- SigV4 (WebCrypto) ----------
+const enc = new TextEncoder();
+const hex = (buf) => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+const sha256 = async (s) => hex(await crypto.subtle.digest("SHA-256", enc.encode(s)));
+async function hmac(key, msg) {
+  const k = await crypto.subtle.importKey("raw", key, {name:"HMAC", hash:"SHA-256"}, false, ["sign"]);
+  return new Uint8Array(await crypto.subtle.sign("HMAC", k, enc.encode(msg)));
+}
+async function sigv4Fetch(method, url, body) {
+  const u = new URL(url);
+  const region = $("region").value.trim();
+  const akid = $("akid").value.trim(), secret = $("secret").value.trim(), token = $("token").value.trim();
+  if (!akid || !secret) throw new Error("AWS credentials required");
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
+  const date = amzDate.slice(0, 8);
+  const payloadHash = await sha256(body || "");
+  let headers = { "content-type": "application/json", "host": u.host, "x-amz-date": amzDate };
+  if (token) headers["x-amz-security-token"] = token;
+  const signedHeaders = Object.keys(headers).sort().join(";");
+  const canonicalHeaders = Object.keys(headers).sort().map(k => k + ":" + headers[k].trim() + "\n").join("");
+  const canonical = [method, u.pathname, "", canonicalHeaders, signedHeaders, payloadHash].join("\n");
+  const scope = `${date}/${region}/execute-api/aws4_request`;
+  const toSign = ["AWS4-HMAC-SHA256", amzDate, scope, await sha256(canonical)].join("\n");
+  let key = enc.encode("AWS4" + secret);
+  for (const part of [date, region, "execute-api", "aws4_request"]) key = await hmac(key, part);
+  const signature = hex(await hmac(key, toSign));
+  headers["authorization"] = `AWS4-HMAC-SHA256 Credential=${akid}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+  delete headers["host"]; // browser sets it
+  return fetch(url, { method, headers, body: body || undefined });
+}
+
+// ---------- AppSync Events WebSocket ----------
+const b64url = (s) => btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+function authObj() { return { host: $("eventsHttp").value.trim(), "x-api-key": $("apiKey").value.trim() }; }
+
+function connectWs() {
+  return new Promise((resolve, reject) => {
+    const url = `wss://${$("eventsRealtime").value.trim()}/event/realtime`;
+    ws = new WebSocket(url, ["aws-appsync-event-ws", "header-" + b64url(JSON.stringify(authObj()))]);
+    ws.onopen = () => ws.send(JSON.stringify({ type: "connection_init" }));
+    ws.onmessage = (m) => {
+      const msg = JSON.parse(m.data);
+      if (msg.type === "connection_ack") { wsReady = true; setConn("connected"); resolve(); }
+      else if (msg.type === "subscribe_success") { const cb = pendingSubs.get(msg.id); if (cb) { pendingSubs.delete(msg.id); cb(); } }
+      else if (msg.type === "subscribe_error") { const cb = pendingSubs.get(msg.id); pendingSubs.delete(msg.id); console.error(msg); if (cb) cb(new Error("subscribe failed")); }
+      else if (msg.type === "data") { const jobId = subs.get(msg.id); if (jobId) onEvent(jobId, JSON.parse(msg.event)); }
+    };
+    ws.onerror = (e) => { setConn("error"); reject(e); };
+    ws.onclose = () => { wsReady = false; if (!dropped) setConn("closed"); };
+  });
+}
+function setConn(s) { $("connState").textContent = "push channel: " + s; }
+
+async function subscribe(jobId) {
+  if (!wsReady) await connectWs();
+  const id = crypto.randomUUID();
+  return new Promise((resolve, reject) => {
+    pendingSubs.set(id, (err) => err ? reject(err) : resolve());
+    subs.set(id, jobId);
+    ws.send(JSON.stringify({ type: "subscribe", id, channel: `/jobs/${jobId}`, authorization: authObj() }));
+  });
+}
+
+// ---------- job lifecycle ----------
+async function submitJobs() {
+  const n = parseInt($("jobCount").value, 10);
+  const mock = $("mode").value === "mock";
+  $("submitBtn").disabled = true;
+  try {
+    const ids = Array.from({ length: n }, () => crypto.randomUUID());
+    t0 = t0 || Date.now();
+    // Subscribe BEFORE submitting so no chunk can be missed.
+    await Promise.all(ids.map(id => { addJob(id); return subscribe(id); }));
+    await Promise.all(ids.map(async (id) => {
+      record(id, Date.now(), "submitted", "submitted");
+      const body = JSON.stringify({ jobId: id, prompt: $("prompt").value, mock,
+        mockChunks: parseInt($("mockChunks").value, 10), mockIntervalMs: parseInt($("mockInterval").value, 10) });
+      const r = await sigv4Fetch("POST", $("ingestEndpoint").value.trim().replace(/\/$/, "") + "/jobs", body);
+      if (!r.ok) { record(id, Date.now(), "error", `submit failed ${r.status}`); jobs.get(id).stats.status = "SUBMIT_FAILED"; }
+    }));
+  } catch (e) { alert(e.message); }
+  $("submitBtn").disabled = false;
+  draw();
+}
+
+function addJob(jobId) {
+  if (jobs.has(jobId)) return;
+  jobs.set(jobId, { row: jobs.size, events: [], stats: { status: "QUEUED", chunks: 0, queueWaitMs: null, firstChunkMs: null, lastChunkT: null, firstChunkT: null, submitT: Date.now() } });
+}
+function record(jobId, t, kind, label) { const j = jobs.get(jobId); if (j) { j.events.push({ t, kind, label }); scheduleDraw(); } }
+
+function onEvent(jobId, evt) {
+  const j = jobs.get(jobId); if (!j) return;
+  const now = Date.now();
+  if (evt.type === "status") {
+    if (evt.status === "started") { j.stats.status = "STREAMING"; j.stats.queueWaitMs = evt.queueWaitMs ?? null; record(jobId, now, "started", `started (queue wait ${evt.queueWaitMs} ms, attempt ${evt.attempt})`); }
+    else if (evt.status === "throttled") { j.stats.status = "THROTTLED"; record(jobId, now, "throttled", `throttled — retry in ${evt.retryAfter}s (absorbed server-side)`); }
+    else if (evt.status === "retrying") { j.stats.status = "RETRYING"; record(jobId, now, "throttled", `retrying: ${evt.error || ""}`); }
+  } else if (evt.type === "chunk") {
+    j.stats.chunks++; j.stats.status = "STREAMING";
+    if (!j.stats.firstChunkT) { j.stats.firstChunkT = now; j.stats.firstChunkMs = now - j.stats.submitT; }
+    j.stats.lastChunkT = now;
+    record(jobId, now, "chunk", `chunk #${evt.seq} · agent→client ${now - evt.emitTs} ms · "${(evt.text || "").slice(0, 60)}"`);
+  } else if (evt.type === "end") {
+    j.stats.status = "COMPLETED";
+    record(jobId, now, "end", `completed · ${j.stats.chunks} chunks`);
+  }
+  renderTable();
+}
+
+// ---------- recovery demo ----------
+$("dropBtn").onclick = () => { dropped = true; if (ws) ws.close(); setConn("DROPPED by user — jobs keep running server-side"); $("recoverBtn").disabled = false; };
+$("recoverBtn").onclick = async () => {
+  dropped = false; subs.clear(); pendingSubs.clear();
+  await connectWs();
+  for (const [jobId, j] of jobs) {
+    if (j.stats.status !== "COMPLETED") await subscribe(jobId).catch(() => {});
+    const r = await sigv4Fetch("GET", $("ingestEndpoint").value.trim().replace(/\/$/, "") + "/jobs/" + jobId, "");
+    if (r.ok) {
+      const item = await r.json();
+      if (item.status === "COMPLETED" && j.stats.status !== "COMPLETED") {
+        j.stats.status = "RECOVERED"; j.stats.chunks = item.chunkCount || j.stats.chunks;
+        record(jobId, Date.now(), "end", `recovered from job store · ${item.chunkCount} chunks server-side`);
+      }
+    }
+  }
+  renderTable(); $("recoverBtn").disabled = true;
+};
+$("clearBtn").onclick = () => { jobs.clear(); t0 = null; draw(); renderTable(); };
+$("submitBtn").onclick = submitJobs;
+
+// ---------- timeline chart (SVG event plot) ----------
+const MARKS = {
+  submitted: { color: "var(--status-neutral)", shape: "tick",     label: "submitted" },
+  started:   { color: "var(--status-start)",   shape: "triangle", label: "stream started" },
+  chunk:     { color: "var(--series-chunk)",   shape: "dot",      label: "chunk arrival" },
+  throttled: { color: "var(--status-warning)", shape: "square",   label: "throttled (retry absorbed)" },
+  end:       { color: "var(--status-good)",    shape: "diamond",  label: "completed" },
+  error:     { color: "var(--status-critical)",shape: "square",   label: "error" },
+};
+const legendEl = $("legend");
+legendEl.innerHTML = Object.values(MARKS).map(m =>
+  `<span><svg width="14" height="14">${shapeSvg(m.shape, 7, 7, m.color)}</svg>${m.label}</span>`).join("");
+
+function shapeSvg(shape, x, y, color) {
+  if (shape === "dot") return `<circle cx="${x}" cy="${y}" r="4" fill="${color}"/>`;
+  if (shape === "triangle") return `<path d="M${x} ${y-5} L${x+4.5} ${y+3.5} L${x-4.5} ${y+3.5} Z" fill="${color}"/>`;
+  if (shape === "square") return `<rect x="${x-4}" y="${y-4}" width="8" height="8" rx="1.5" fill="${color}"/>`;
+  if (shape === "diamond") return `<path d="M${x} ${y-5} L${x+5} ${y} L${x} ${y+5} L${x-5} ${y} Z" fill="${color}"/>`;
+  return `<rect x="${x-1}" y="${y-6}" width="2" height="12" fill="${color}"/>`; // tick
+}
+
+let drawQueued = false;
+function scheduleDraw() { if (!drawQueued) { drawQueued = true; requestAnimationFrame(() => { drawQueued = false; draw(); }); } }
+setInterval(() => { if ([...jobs.values()].some(j => !["COMPLETED","RECOVERED","SUBMIT_FAILED"].includes(j.stats.status))) scheduleDraw(); }, 500);
+
+function draw() {
+  const svg = $("chart");
+  const rowH = 26, left = 84, right = 20, top = 8, bottom = 26;
+  const rows = jobs.size;
+  const spanMs = Math.max(5000, ...[...jobs.values()].flatMap(j => j.events.map(e => e.t - t0)), (t0 ? Date.now() - t0 : 0));
+  const width = Math.max(860, Math.min(1600, 860));
+  const height = top + rows * rowH + bottom;
+  svg.setAttribute("width", width); svg.setAttribute("height", Math.max(height, 60));
+  const x = (t) => left + ((t - t0) / spanMs) * (width - left - right);
+  let out = "";
+  // gridlines + axis (recessive)
+  const step = niceStep(spanMs);
+  for (let ms = 0; ms <= spanMs; ms += step) {
+    const px = left + (ms / spanMs) * (width - left - right);
+    out += `<line x1="${px}" y1="${top}" x2="${px}" y2="${height-bottom}" stroke="var(--grid)" stroke-width="1"/>`;
+    out += `<text x="${px}" y="${height-8}" fill="var(--muted)" font-size="10" text-anchor="middle">${ms/1000}s</text>`;
+  }
+  out += `<line x1="${left}" y1="${height-bottom}" x2="${width-right}" y2="${height-bottom}" stroke="var(--baseline)" stroke-width="1"/>`;
+  for (const [jobId, j] of jobs) {
+    const cy = top + j.row * rowH + rowH / 2;
+    out += `<text x="${left-8}" y="${cy+3}" fill="var(--text-secondary)" font-size="11" text-anchor="end">${jobId.slice(0,8)}</text>`;
+    out += `<line x1="${left}" y1="${cy}" x2="${width-right}" y2="${cy}" stroke="var(--grid)" stroke-width="1" opacity="0.5"/>`;
+    for (const e of j.events) {
+      const m = MARKS[e.kind] || MARKS.error;
+      out += `<g class="mark" data-job="${jobId}" data-label="${escapeHtml(e.label)}" data-t="${e.t}">` +
+             `<circle cx="${x(e.t)}" cy="${cy}" r="9" fill="transparent"/>` +  // hit target bigger than mark
+             shapeSvg(m.shape, x(e.t), cy, m.color) + `</g>`;
+    }
+  }
+  svg.innerHTML = out;
+}
+function niceStep(spanMs) {
+  const target = spanMs / 8;
+  const steps = [500,1000,2000,5000,10000,15000,30000,60000,120000,300000];
+  return steps.find(s => s >= target) || 600000;
+}
+function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+// tooltip (hover layer)
+const tooltip = $("tooltip");
+$("chart").addEventListener("mousemove", (e) => {
+  const g = e.target.closest("g.mark");
+  if (!g) { tooltip.style.display = "none"; return; }
+  tooltip.style.display = "block";
+  tooltip.innerHTML = `<strong>${g.dataset.job.slice(0,8)}</strong> · +${((+g.dataset.t - t0)/1000).toFixed(2)}s<br>${g.dataset.label}`;
+  tooltip.style.left = (e.clientX + 12) + "px"; tooltip.style.top = (e.clientY + 12) + "px";
+});
+$("chart").addEventListener("mouseleave", () => tooltip.style.display = "none");
+
+// ---------- table view ----------
+function renderTable() {
+  const tbody = $("jobsTable").querySelector("tbody");
+  tbody.innerHTML = [...jobs.entries()].map(([id, j]) => {
+    const s = j.stats;
+    const streamMs = (s.firstChunkT && s.lastChunkT) ? s.lastChunkT - s.firstChunkT : null;
+    const avgGap = (streamMs && s.chunks > 1) ? Math.round(streamMs / (s.chunks - 1)) : null;
+    return `<tr><td>${id.slice(0,8)}</td><td class="status">${s.status}</td><td>${s.queueWaitMs ?? "—"}</td>` +
+      `<td>${s.firstChunkMs ?? "—"}</td><td>${s.chunks}</td><td>${streamMs ?? "—"}</td><td>${avgGap ?? "—"}</td></tr>`;
+  }).join("");
+}
+draw();
+</script>
+</body>
+</html>

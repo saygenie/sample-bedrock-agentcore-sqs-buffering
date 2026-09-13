@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Node / CDK
+node_modules/
+cdk.out/
+*.js.map
+.cdk.staging/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform.lock.hcl
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Local state / secrets
+*.local.md
+.env
+.env.*
+outputs/*.local.json
+
+# Claude Code local files
+.claude/*.local.*
+
+# local tooling
+.claude/
+.venv
+.venv-tests/
+
+# internal working files (never published)
+PLAN.md
+PROGRESS.md
