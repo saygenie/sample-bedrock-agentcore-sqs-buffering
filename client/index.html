@@ -51,6 +51,11 @@
   button.ghost { background: transparent; color: var(--text-primary); }
   button:disabled { opacity: .45; cursor: default; }
   .row { display: flex; gap: 8px; align-items: end; flex-wrap: wrap; margin-top: 12px; }
+  .tiles { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+  .tile { flex: 1 1 150px; border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; }
+  .tile .v { font-size: 24px; line-height: 1.15; color: var(--text-primary); }
+  .tile .v .of { font-size: 13px; color: var(--text-secondary); }
+  .tile .k { font-size: 11px; color: var(--muted); margin-top: 2px; }
   .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; }
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
   .chartwrap { overflow-x: auto; }
@@ -110,12 +115,15 @@
   </section>
 
   <section>
-    <h2>Chunk arrivals per job — wall-clock time →</h2>
+    <h2>Queueing, pacing and chunk arrivals — wall-clock time →</h2>
+    <div class="tiles" id="tiles"></div>
     <div class="legend" id="legend"></div>
-    <div class="chartwrap"><svg id="chart" role="img" aria-label="Timeline of chunk arrivals per job"></svg></div>
-    <div class="note">Each row is one job. A tight burst enters the queue at once; rows <em>start</em> in waves of the
-      consumer concurrency limit, and each row's dots advance steadily — that spacing is the agent's own emission
-      cadence surviving the whole pipeline. A throttled job shows a warning marker, then simply starts later.</div>
+    <div class="chartwrap"><svg id="chart" role="img" aria-label="Concurrent streams over time, and per-job queue wait and chunk arrivals"></svg></div>
+    <div class="note">The top strip counts how many jobs are streaming at the same instant; the dashed line is the
+      consumer's concurrency limit, which it never crosses. Below, each row is one job: the grey bar is time spent
+      <em>waiting</em> (submitted, not yet started), the blue bar is its stream, and the dots are chunk arrivals —
+      their spacing is the agent's own emission cadence surviving the whole pipeline. Submit more jobs than the limit
+      and the surplus simply waits, then starts as slots free up.</div>
   </section>
 
   <section>
@@ -136,6 +144,12 @@ const jobs = new Map();       // jobId -> {row, events:[{t, kind, label}], stats
 let t0 = null;                // chart epoch (first submit)
 let ws = null, wsReady = false, wsPromise = null, subs = new Map(), pendingSubs = new Map();
 let dropped = false;
+// Pacing ceiling (consumer event-source maximumConcurrency), from stack outputs.
+let concurrencyLimit = parseInt(localStorage.getItem("demo:maxConcurrency") || "", 10) || null;
+function setConcurrencyLimit(v) {
+  const n = parseInt(v, 10);
+  if (n > 0) { concurrencyLimit = n; localStorage.setItem("demo:maxConcurrency", String(n)); }
+}
 
 const $ = (id) => document.getElementById(id);
 const cfgIds = ["ingestEndpoint","region","eventsHttp","eventsRealtime","apiKey"];
@@ -153,6 +167,7 @@ let proxyMode = false;
     $("ingestEndpoint").value = c.IngestEndpoint; $("region").value = c.Region;
     $("eventsHttp").value = c.EventsHttpDomain; $("eventsRealtime").value = c.EventsRealtimeDomain;
     $("apiKey").value = c.EventsApiKey;
+    setConcurrencyLimit(c.MaxConcurrency); draw();
     proxyMode = true;
     document.querySelectorAll(".manual-only").forEach(el => el.style.display = "none");
     $("proxyNote").style.display = "block";
@@ -173,6 +188,7 @@ $("outputsPaste").addEventListener("change", () => {
     const set = (id, v) => { if (v) { $(id).value = v; localStorage.setItem("demo:"+id, v); } };
     set("ingestEndpoint", o.IngestEndpoint); set("eventsHttp", o.EventsHttpDomain);
     set("eventsRealtime", o.EventsRealtimeDomain); set("apiKey", o.EventsApiKey);
+    setConcurrencyLimit(o.MaxConcurrency); draw();
   } catch (e) { alert("Could not parse outputs JSON: " + e.message); }
 });
 
@@ -318,17 +334,21 @@ $("clearBtn").onclick = () => { jobs.clear(); t0 = null; draw(); renderTable(); 
 $("submitBtn").onclick = submitJobs;
 
 // ---------- timeline chart (SVG event plot) ----------
+// submitted/started are still recorded (they define the bar edges) but drawn as
+// bars rather than point marks, so they are not in this table.
 const MARKS = {
-  submitted: { color: "var(--status-neutral)", shape: "tick",     label: "submitted" },
-  started:   { color: "var(--status-start)",   shape: "triangle", label: "stream started" },
   chunk:     { color: "var(--series-chunk)",   shape: "dot",      label: "chunk arrival" },
   throttled: { color: "var(--status-warning)", shape: "square",   label: "throttled (retry absorbed)" },
   end:       { color: "var(--status-good)",    shape: "diamond",  label: "completed" },
   error:     { color: "var(--status-critical)",shape: "square",   label: "error" },
 };
-const legendEl = $("legend");
-legendEl.innerHTML = Object.values(MARKS).map(m =>
-  `<span><svg width="14" height="14">${shapeSvg(m.shape, 7, 7, m.color)}</svg>${m.label}</span>`).join("");
+const barSwatch = (fill, opacity) =>
+  `<svg width="22" height="12"><rect x="0" y="3" width="22" height="7" rx="3.5" fill="${fill}" opacity="${opacity}"/></svg>`;
+$("legend").innerHTML = [
+  `<span>${barSwatch("var(--status-neutral)", 0.5)}waiting in queue</span>`,
+  `<span>${barSwatch("var(--series-chunk)", 0.28)}streaming (holds one slot)</span>`,
+  ...Object.values(MARKS).map(m => `<span><svg width="14" height="14">${shapeSvg(m.shape, 7, 7, m.color)}</svg>${m.label}</span>`),
+].join("");
 
 function shapeSvg(shape, x, y, color) {
   if (shape === "dot") return `<circle cx="${x}" cy="${y}" r="4" fill="${color}"/>`;
@@ -340,43 +360,132 @@ function shapeSvg(shape, x, y, color) {
 
 let drawQueued = false;
 function scheduleDraw() { if (!drawQueued) { drawQueued = true; requestAnimationFrame(() => { drawQueued = false; draw(); }); } }
-setInterval(() => { if ([...jobs.values()].some(j => !["COMPLETED","RECOVERED","SUBMIT_FAILED"].includes(j.stats.status))) scheduleDraw(); }, 500);
+setInterval(() => { if ([...jobs.values()].some(j => !isTerminal(j))) scheduleDraw(); }, 500);
 window.addEventListener("resize", scheduleDraw);
+
+const TERMINAL = ["COMPLETED", "RECOVERED", "SUBMIT_FAILED"];
+const isTerminal = (j) => TERMINAL.includes(j.stats.status);
+
+// Per job: when it was submitted, when its stream started, when it ended.
+// A job holds one concurrency slot while streaming; otherwise it is waiting.
+// A throttled job emits started → throttled → started again, so the *last*
+// start is the attempt that actually streamed; everything before it was waiting.
+function spanOf(j, now) {
+  const firstAt = (kind) => { const e = j.events.find(x => x.kind === kind); return e ? e.t : null; };
+  const lastAt = (kind) => { for (let i = j.events.length - 1; i >= 0; i--) if (j.events[i].kind === kind) return j.events[i].t; return null; };
+  const submitT = firstAt("submitted");
+  const betweenAttempts = ["QUEUED", "THROTTLED", "RETRYING"].includes(j.stats.status);
+  const startT = betweenAttempts ? null : lastAt("started");
+  const endT = lastAt("end");
+  return {
+    submitT, startT, endT,
+    waitTo: startT ?? (j.stats.status === "SUBMIT_FAILED" ? submitT : now),
+    streamTo: startT == null ? null : (endT ?? now),
+  };
+}
 
 function draw() {
   const svg = $("chart");
-  const rowH = 26, left = 84, right = 20, top = 8, bottom = 26;
+  const rowH = 22, left = 84, right = 20, top = 8, bottom = 26, stripH = 78, gap = 16;
+  const now = Date.now();
   const rows = jobs.size;
   // While anything is still running the axis tracks wall-clock "now"; once every
   // job reaches a terminal state it freezes just past the last event.
   const lastEventMs = Math.max(0, ...[...jobs.values()].flatMap(j => j.events.map(e => e.t - t0)));
-  const anyActive = [...jobs.values()].some(j => !["COMPLETED","RECOVERED","SUBMIT_FAILED"].includes(j.stats.status));
-  const spanMs = Math.max(5000, (anyActive && t0) ? Date.now() - t0 : lastEventMs + 250);
+  const anyActive = [...jobs.values()].some(j => !isTerminal(j));
+  const spanMs = Math.max(5000, (anyActive && t0) ? now - t0 : lastEventMs + 250);
   const width = Math.max(640, (svg.parentElement && svg.parentElement.clientWidth) || 860);
-  const height = top + rows * rowH + bottom;
-  svg.setAttribute("width", width); svg.setAttribute("height", Math.max(height, 60));
-  const x = (t) => left + ((t - t0) / spanMs) * (width - left - right);
+  const rowsTop = top + stripH + gap;
+  const height = rowsTop + rows * rowH + bottom;
+  svg.setAttribute("width", width); svg.setAttribute("height", Math.max(height, 120));
+  const x = (t) => left + Math.max(0, Math.min(spanMs, t - t0)) / spanMs * (width - left - right);
+  const spans = new Map([...jobs].map(([id, j]) => [id, spanOf(j, now)]));
+
+  // --- concurrency over time (step function from start/end events) ----------
+  const deltas = [];
+  for (const s of spans.values()) {
+    if (s.startT == null) continue;
+    deltas.push([s.startT, 1], [s.streamTo, -1]);
+  }
+  deltas.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  let level = 0, peak = 0;
+  const steps = [];
+  for (const [t, d] of deltas) { level += d; peak = Math.max(peak, level); steps.push([t, level]); }
+  const yMax = Math.max(1, peak, concurrencyLimit || 0);
+  const stripY = (v) => top + stripH - (v / yMax) * stripH;
+
   let out = "";
-  // gridlines + axis (recessive)
   const step = niceStep(spanMs);
   for (let ms = 0; ms <= spanMs; ms += step) {
     const px = left + (ms / spanMs) * (width - left - right);
     out += `<line x1="${px}" y1="${top}" x2="${px}" y2="${height-bottom}" stroke="var(--grid)" stroke-width="1"/>`;
     out += `<text x="${px}" y="${height-8}" fill="var(--muted)" font-size="10" text-anchor="middle">${ms/1000}s</text>`;
   }
+  // strip: y ticks, step area, limit reference line
+  for (const v of (yMax <= 4 ? [0, yMax] : [0, Math.round(yMax / 2), yMax])) {
+    out += `<text x="${left-8}" y="${stripY(v)+3}" fill="var(--muted)" font-size="10" text-anchor="end">${v}</text>`;
+    out += `<line x1="${left}" y1="${stripY(v)}" x2="${width-right}" y2="${stripY(v)}" stroke="var(--grid)" stroke-width="1"/>`;
+  }
+  let path = `M ${x(t0)} ${stripY(0)}`, prev = 0;
+  for (const [t, l] of steps) { path += ` L ${x(t)} ${stripY(prev)} L ${x(t)} ${stripY(l)}`; prev = l; }
+  path += ` L ${width-right} ${stripY(prev)}`;
+  out += `<path d="${path} L ${width-right} ${stripY(0)} Z" fill="var(--series-chunk)" opacity="0.16"/>`;
+  out += `<path d="${path}" fill="none" stroke="var(--series-chunk)" stroke-width="2"/>`;
+  if (concurrencyLimit) {
+    out += `<line x1="${left}" y1="${stripY(concurrencyLimit)}" x2="${width-right}" y2="${stripY(concurrencyLimit)}" ` +
+           `stroke="var(--muted)" stroke-width="2" stroke-dasharray="5 4"/>`;
+    out += `<text x="${width-right}" y="${stripY(concurrencyLimit)-5}" fill="var(--text-secondary)" font-size="10" ` +
+           `text-anchor="end">concurrency limit ${concurrencyLimit}</text>`;
+  }
+  out += `<text x="${left}" y="${top+10}" fill="var(--text-secondary)" font-size="10">concurrent streams</text>`;
+  out += `<line x1="${left}" y1="${top+stripH}" x2="${width-right}" y2="${top+stripH}" stroke="var(--baseline)" stroke-width="1"/>`;
   out += `<line x1="${left}" y1="${height-bottom}" x2="${width-right}" y2="${height-bottom}" stroke="var(--baseline)" stroke-width="1"/>`;
+
+  // --- per-job rows: wait bar, stream bar, event marks --------------------
+  const barH = Math.min(9, rowH - 8);
   for (const [jobId, j] of jobs) {
-    const cy = top + j.row * rowH + rowH / 2;
-    out += `<text x="${left-8}" y="${cy+3}" fill="var(--text-secondary)" font-size="11" text-anchor="end">${jobId.slice(0,8)}</text>`;
-    out += `<line x1="${left}" y1="${cy}" x2="${width-right}" y2="${cy}" stroke="var(--grid)" stroke-width="1" opacity="0.5"/>`;
+    const cy = rowsTop + j.row * rowH + rowH / 2;
+    const s = spans.get(jobId);
+    out += `<text x="${left-8}" y="${cy+3}" fill="var(--text-secondary)" font-size="10" text-anchor="end">${jobId.slice(0,8)}</text>`;
+    if (s.submitT != null && s.waitTo != null) {
+      // 2px surface gap keeps the wait bar from touching the stream bar
+      const x0 = x(s.submitT), x1 = Math.max(x0 + 1, x(s.waitTo) - 2);
+      out += `<g class="mark" data-job="${jobId}" data-t="${s.submitT}" ` +
+             `data-label="${escapeHtml(`waiting ${((s.waitTo - s.submitT)/1000).toFixed(2)}s (submitted → stream start)`)}">` +
+             `<rect x="${x0}" y="${cy-barH/2}" width="${x1-x0}" height="${barH}" rx="${barH/2}" fill="var(--status-neutral)" opacity="0.5"/></g>`;
+    }
+    if (s.startT != null) {
+      const x0 = x(s.startT), x1 = Math.max(x0 + 1, x(s.streamTo));
+      out += `<g class="mark" data-job="${jobId}" data-t="${s.startT}" ` +
+             `data-label="${escapeHtml(`streaming ${((s.streamTo - s.startT)/1000).toFixed(2)}s · holds 1 of ${concurrencyLimit || "?"} slots`)}">` +
+             `<rect x="${x0}" y="${cy-barH/2}" width="${x1-x0}" height="${barH}" rx="${barH/2}" fill="var(--series-chunk)" opacity="0.28"/></g>`;
+    }
     for (const e of j.events) {
+      if (e.kind === "submitted" || e.kind === "started") continue;  // bar edges already show these
       const m = MARKS[e.kind] || MARKS.error;
       out += `<g class="mark" data-job="${jobId}" data-label="${escapeHtml(e.label)}" data-t="${e.t}">` +
-             `<circle cx="${x(e.t)}" cy="${cy}" r="9" fill="transparent"/>` +  // hit target bigger than mark
+             `<circle cx="${x(e.t)}" cy="${cy}" r="8" fill="transparent"/>` +  // hit target bigger than mark
              shapeSvg(m.shape, x(e.t), cy, m.color) + `</g>`;
     }
   }
   svg.innerHTML = out;
+  renderTiles(spans, peak, now);
+}
+
+function renderTiles(spans, peak, now) {
+  const all = [...jobs.values()];
+  const streaming = [...spans.values()].filter(s => s.startT != null && s.endT == null).length;
+  const queued = [...spans.values()].filter(s => s.startT == null && s.submitT != null).length;
+  const waits = [...spans.values()].filter(s => s.submitT != null).map(s => (s.waitTo - s.submitT) / 1000);
+  const doneCount = all.filter(isTerminal).length;
+  const tile = (v, k) => `<div class="tile"><div class="v">${v}</div><div class="k">${k}</div></div>`;
+  $("tiles").innerHTML = [
+    tile(`${peak}${concurrencyLimit ? ` <span class="of">/ ${concurrencyLimit}</span>` : ""}`, "peak concurrent streams / limit"),
+    tile(streaming, "streaming now"),
+    tile(queued, "waiting in queue"),
+    tile(waits.length ? `${Math.max(...waits).toFixed(1)}s` : "—", "longest wait before start"),
+    tile(`${doneCount} <span class="of">/ ${all.length}</span>`, "completed"),
+  ].join("");
 }
 function niceStep(spanMs) {
   const target = spanMs / 8;

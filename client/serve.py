@@ -68,6 +68,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "EventsHttpDomain": outputs["EventsHttpDomain"],
                 "EventsRealtimeDomain": outputs["EventsRealtimeDomain"],
                 "EventsApiKey": outputs["EventsApiKey"],
+                "MaxConcurrency": outputs.get("MaxConcurrency"),
                 "Region": REGION,
             }
             self._respond(200, json.dumps(config).encode())

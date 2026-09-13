@@ -328,6 +328,8 @@ class BufferingStack(Stack):
         CfnOutput(self, "GatewayUrl", value=gateway.attr_gateway_url)
         CfnOutput(self, "GatewayTargetId", value=target.attr_target_id)
         CfnOutput(self, "RuntimeArn", value=runtime.agent_runtime_arn)
+        # The demo plots this as the pacing ceiling, so it must be discoverable.
+        CfnOutput(self, "MaxConcurrency", value=str(max_concurrency))
         CfnOutput(self, "QueueUrl", value=queue.queue_url)
         CfnOutput(self, "DlqUrl", value=dlq.queue_url)
         CfnOutput(self, "JobsTableName", value=jobs_table.table_name)
