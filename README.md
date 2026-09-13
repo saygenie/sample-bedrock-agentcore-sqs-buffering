@@ -42,6 +42,15 @@ flowchart LR
 The request path (1–5) buffers and paces; the response path (6–7) streams and
 never touches the queue.
 
+- The **request path** goes through SQS: bursts are absorbed losslessly, pacing is
+  enforced by the consumer's `maximumConcurrency`, and `429`s are retried inside
+  the system using the server-provided `retryAfter`.
+- The **response path** never touches the queue: the consumer reads the agent's
+  SSE stream through Gateway and relays every chunk to the client's WebSocket
+  channel the moment it arrives.
+- A **job store** decouples job lifetime from connection lifetime: drop the
+  connection mid-stream and the job still finishes; fetch the result by job id.
+
 ## See it running
 
 ![Demo: 20 jobs submitted at once — the top strip stays pinned to the concurrency limit while surplus jobs wait in the queue, and each row's chunks arrive progressively](docs/demo.gif)
@@ -51,16 +60,7 @@ at the top counts jobs streaming at the same instant and never crosses the dashe
 limit; the grey bars are jobs waiting their turn in the queue; the blue dots are
 chunks arriving one by one, spaced as the agent emitted them. Every job completes.
 
-[Full recording (41s, silent)](docs/demo.mp4)
-
-- The **request path** goes through SQS: bursts are absorbed losslessly, pacing is
-  enforced by the consumer's `maximumConcurrency`, and `429`s are retried inside
-  the system using the server-provided `retryAfter`.
-- The **response path** never touches the queue: the consumer reads the agent's
-  SSE stream through Gateway and relays every chunk to the client's WebSocket
-  channel the moment it arrives.
-- A **job store** decouples job lifetime from connection lifetime: drop the
-  connection mid-stream and the job still finishes; fetch the result by job id.
+[Full recording (41s)](docs/demo.mp4)
 
 ## What you will see (and measure)
 
@@ -82,7 +82,44 @@ chunks arriving one by one, spaced as the agent emitted them. Every job complete
 - AWS account with [Amazon Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html)
   to Anthropic Claude Haiku 4.5 in `us-west-2` (or set `modelId` in `infra/cdk.json`)
 - Node.js 18+ (for the AWS CDK CLI), Python 3.11+, Docker (ARM64 image build)
-- AWS credentials with administrative permissions for deployment
+- AWS credentials for deployment (see [Permissions](#permissions) for what is needed)
+
+## Permissions
+
+**Deploying** runs CDK, which creates IAM roles, an ECR image, Lambda functions,
+SQS queues, a DynamoDB table, an AppSync API and AgentCore resources — so the
+deploying identity needs broad administrative access to those services plus
+CloudFormation. `./scripts/destroy.sh` additionally needs
+`logs:DescribeLogGroups` and `logs:DeleteLogGroup`.
+
+**Running the demo and the tests** needs far less. This policy was verified to be
+sufficient by running the demo client, the scenarios and `throttle_demo.py` under
+a role that had nothing else:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Sid": "SubmitAndPollJobs", "Effect": "Allow",
+      "Action": "execute-api:Invoke",
+      "Resource": "arn:aws:execute-api:us-west-2:<account>:<ingest-api-id>/*" },
+    { "Sid": "ReadQueueDepths", "Effect": "Allow",
+      "Action": "sqs:GetQueueAttributes",
+      "Resource": ["<job-queue-arn>", "<dlq-arn>"] },
+    { "Sid": "ThrottleDemo", "Effect": "Allow",
+      "Action": ["bedrock-agentcore:ListGatewayRateLimits",
+                 "bedrock-agentcore:UpdateGatewayRateLimit"],
+      "Resource": "arn:aws:bedrock-agentcore:us-west-2:<account>:gateway/<gateway-id>" }
+  ]
+}
+```
+
+`execute-api:Invoke` is what the IAM-authenticated ingest API requires: the demo
+client needs it (either through `client/serve.py`, which signs with your local
+credentials, or directly in static mode), and so do the acceptance tests. The
+queue permission is only for reading DLQ depth in scenario 2, and the rate-limit
+permissions only for scenario 3 / `throttle_demo.py`. Nothing here grants access
+to the agent itself — see below.
 
 ## Deploy
 
@@ -195,43 +232,6 @@ Removes every stack resource, including the log groups the Lambdas and the
 AgentCore Runtime create. The CDK bootstrap stack (shared) and the ECR container
 image assets in the bootstrap repository are not deleted; remove those manually
 if you no longer use CDK in the account.
-
-## Permissions
-
-**Deploying** runs CDK, which creates IAM roles, an ECR image, Lambda functions,
-SQS queues, a DynamoDB table, an AppSync API and AgentCore resources — so the
-deploying identity needs broad administrative access to those services plus
-CloudFormation. `./scripts/destroy.sh` additionally needs
-`logs:DescribeLogGroups` and `logs:DeleteLogGroup`.
-
-**Running the demo and the tests** needs far less. This policy was verified to be
-sufficient by running the demo client, the scenarios and `throttle_demo.py` under
-a role that had nothing else:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    { "Sid": "SubmitAndPollJobs", "Effect": "Allow",
-      "Action": "execute-api:Invoke",
-      "Resource": "arn:aws:execute-api:us-west-2:<account>:<ingest-api-id>/*" },
-    { "Sid": "ReadQueueDepths", "Effect": "Allow",
-      "Action": "sqs:GetQueueAttributes",
-      "Resource": ["<job-queue-arn>", "<dlq-arn>"] },
-    { "Sid": "ThrottleDemo", "Effect": "Allow",
-      "Action": ["bedrock-agentcore:ListGatewayRateLimits",
-                 "bedrock-agentcore:UpdateGatewayRateLimit"],
-      "Resource": "arn:aws:bedrock-agentcore:us-west-2:<account>:gateway/<gateway-id>" }
-  ]
-}
-```
-
-`execute-api:Invoke` is what the IAM-authenticated ingest API requires: the demo
-client needs it (either through `client/serve.py`, which signs with your local
-credentials, or directly in static mode), and so do the acceptance tests. The
-queue permission is only for reading DLQ depth in scenario 2, and the rate-limit
-permissions only for scenario 3 / `throttle_demo.py`. Nothing here grants access
-to the agent itself — see below.
 
 ## Security
 
