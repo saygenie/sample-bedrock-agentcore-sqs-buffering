@@ -98,6 +98,21 @@ python3 client/serve.py                 # http://127.0.0.1:8765
 3. 스트림 도중 **Drop connection**을 누른 뒤 **Reconnect & recover**로 잡 저장소에서
    완료된 결과를 가져온다.
 
+### 각 동작을 의도적으로 관찰하기
+
+- **큐잉·페이싱** — *Jobs to submit*을 소비자 동시성 한도(`maxConcurrency`, 기본 10)보다
+  크게 설정한다: 20이면 2개 웨이브, 50이면 5개 웨이브. 각 잡이 스트림 길이만큼 동시성
+  슬롯을 점유하므로, *Mock chunks*를 늘리면 웨이브 사이 간격이 벌어져 더 뚜렷해진다.
+- **스로틀 흡수** — 잡 수만 늘려서는 절대 발생하지 않는다: 설계상 페이싱이 요청 속도를
+  Gateway rate limit 아래로 유지하기 때문이다. 대신 의도적인 불일치를 만든다:
+
+  ```bash
+  python3 scripts/throttle_demo.py on    # 한도를 1/분으로, 전파까지 대기
+  # 브라우저에서 버스트 제출: 노란 "throttled" 마커가 찍히고, 해당 행은 ~60초 후
+  # (서버가 알려준 retryAfter) 시작되며, 모든 잡은 결국 완료된다
+  python3 scripts/throttle_demo.py off   # 복원
+  ```
+
 대안으로, 이 페이지는 순수 정적 파일로도 동작한다(로컬 서버 없이 `client/index.html`을
 직접 열기): `outputs/stack-outputs.local.json` 내용과 임시 자격증명
 (`aws configure export-credentials --format env`)을 Connection 폼에 붙여넣으면 되고,

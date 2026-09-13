@@ -103,6 +103,23 @@ no credentials ever enter the browser. Then:
 3. Press **Drop connection** mid-stream, then **Reconnect & recover** to fetch
    the finished result from the job store.
 
+### Seeing each behavior on purpose
+
+- **Queuing and pacing** — set *Jobs to submit* above the consumer concurrency
+  limit (`maxConcurrency`, 10 by default): 20 gives two waves, 50 gives five.
+  Raise *Mock chunks* to widen the gap between waves, since each job holds one
+  concurrency slot for the length of its stream.
+- **Throttle absorption** — job count alone will never trigger it: pacing keeps
+  the request rate under the Gateway rate limit by design. Create a deliberate
+  mismatch instead:
+
+  ```bash
+  python3 scripts/throttle_demo.py on    # limit -> 1/minute, waits for propagation
+  # submit a burst in the browser: yellow "throttled" markers, those rows start
+  # ~60s later (the server's retryAfter), and every job still completes
+  python3 scripts/throttle_demo.py off   # restore
+  ```
+
 Alternatively the page also works as a plain static file (open
 `client/index.html` directly, no local server): paste the contents of
 `outputs/stack-outputs.local.json` plus temporary credentials
