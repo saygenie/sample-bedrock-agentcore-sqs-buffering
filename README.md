@@ -42,6 +42,17 @@ flowchart LR
 The request path (1–5) buffers and paces; the response path (6–7) streams and
 never touches the queue.
 
+## See it running
+
+![Demo: 20 jobs submitted at once — the top strip stays pinned to the concurrency limit while surplus jobs wait in the queue, and each row's chunks arrive progressively](docs/demo.gif)
+
+20 mock jobs submitted in one burst against a concurrency limit of 10. The strip
+at the top counts jobs streaming at the same instant and never crosses the dashed
+limit; the grey bars are jobs waiting their turn in the queue; the blue dots are
+chunks arriving one by one, spaced as the agent emitted them. Every job completes.
+
+[Full recording (41s, silent)](docs/demo.mp4)
+
 - The **request path** goes through SQS: bursts are absorbed losslessly, pacing is
   enforced by the consumer's `maximumConcurrency`, and `429`s are retried inside
   the system using the server-provided `retryAfter`.
