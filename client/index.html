@@ -345,7 +345,11 @@ function draw() {
   const svg = $("chart");
   const rowH = 26, left = 84, right = 20, top = 8, bottom = 26;
   const rows = jobs.size;
-  const spanMs = Math.max(5000, ...[...jobs.values()].flatMap(j => j.events.map(e => e.t - t0)), (t0 ? Date.now() - t0 : 0));
+  // While anything is still running the axis tracks wall-clock "now"; once every
+  // job reaches a terminal state it freezes just past the last event.
+  const lastEventMs = Math.max(0, ...[...jobs.values()].flatMap(j => j.events.map(e => e.t - t0)));
+  const anyActive = [...jobs.values()].some(j => !["COMPLETED","RECOVERED","SUBMIT_FAILED"].includes(j.stats.status));
+  const spanMs = Math.max(5000, (anyActive && t0) ? Date.now() - t0 : lastEventMs + 250);
   const width = Math.max(640, (svg.parentElement && svg.parentElement.clientWidth) || 860);
   const height = top + rows * rowH + bottom;
   svg.setAttribute("width", width); svg.setAttribute("height", Math.max(height, 60));
