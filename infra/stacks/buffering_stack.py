@@ -45,6 +45,7 @@ class BufferingStack(Stack):
         max_concurrency = int(self.node.try_get_context("maxConcurrency") or 10)
         rate_limit_rps = int(self.node.try_get_context("rateLimitRps") or 10)
         model_id = self.node.try_get_context("modelId") or "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        invoke_mode = self.node.try_get_context("invokeMode") or "gateway"
 
         # --- Job state store -------------------------------------------------
         jobs_table = dynamodb.Table(
@@ -103,7 +104,12 @@ class BufferingStack(Stack):
         gateway_role = iam.Role(
             self,
             "GatewayRole",
-            assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+            # Scope the service trust to this account so another customer's
+            # gateway cannot assume this role (cross-service confused deputy).
+            assumed_by=iam.ServicePrincipal(
+                "bedrock-agentcore.amazonaws.com",
+                conditions={"StringEquals": {"aws:SourceAccount": self.account}},
+            ),
         )
         runtime.grant_invoke(gateway_role)
 
@@ -200,7 +206,7 @@ class BufferingStack(Stack):
                 "GATEWAY_URL": gateway.attr_gateway_url,
                 "TARGET_NAME": GATEWAY_TARGET_NAME,
                 "RUNTIME_ARN": runtime.agent_runtime_arn,
-                "INVOKE_MODE": "gateway",
+                "INVOKE_MODE": invoke_mode,
                 "DEFAULT_RETRY_SECONDS": "30",
                 "ERROR_RETRY_SECONDS": "15",
             },
@@ -213,7 +219,9 @@ class BufferingStack(Stack):
                 report_batch_item_failures=True,
             )
         )
-        jobs_table.grant_read_write_data(consumer_fn)
+        # Only the calls the handler actually makes: a conditional claim, status
+        # updates, and reading back the owner on a claim conflict.
+        jobs_table.grant(consumer_fn, "dynamodb:UpdateItem", "dynamodb:GetItem")
         event_api.grant_publish(consumer_fn)
         # SqsEventSource grants consume (incl. ChangeMessageVisibility for retry pacing).
         consumer_fn.add_to_role_policy(
@@ -222,7 +230,52 @@ class BufferingStack(Stack):
                 resources=[gateway.attr_gateway_arn, f"{gateway.attr_gateway_arn}/*"],
             )
         )
-        runtime.grant_invoke(consumer_fn)  # INVOKE_MODE=direct escape hatch / measurement
+        # The default deployment deliberately grants NO direct runtime access, so
+        # the Gateway really is the only way in. Opt in with -c invokeMode=direct
+        # to measure the Gateway's overhead against a direct baseline.
+        allowed_invokers = [gateway_role.role_arn]
+        if invoke_mode == "direct":
+            runtime.grant_invoke(consumer_fn)
+            allowed_invokers.append(consumer_fn.role.role_arn)
+
+        # Identity-based grants alone do not stop a bypass: within one account an
+        # identity-based Allow is sufficient on its own, so any privileged
+        # principal could call the runtime directly (measured — an admin user
+        # succeeded against an Allow-only resource policy). Only an explicit Deny
+        # makes "the gateway is the only entrance" an enforced property.
+        invoke_actions = [
+            "bedrock-agentcore:InvokeAgentRuntime",
+            "bedrock-agentcore:InvokeAgentRuntimeForUser",
+        ]
+        agentcore.CfnResourcePolicy(
+            self,
+            "RuntimeResourcePolicy",
+            resource_arn=runtime.agent_runtime_arn,
+            policy=Stack.of(self).to_json_string(
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Sid": "AllowGateway",
+                            "Effect": "Allow",
+                            "Principal": {"AWS": allowed_invokers},
+                            "Action": invoke_actions,
+                            # PutResourcePolicy requires exactly this one ARN —
+                            # adding a "/*" qualifier variant is rejected.
+                            "Resource": runtime.agent_runtime_arn,
+                        },
+                        {
+                            "Sid": "DenyEveryoneElse",
+                            "Effect": "Deny",
+                            "Principal": "*",
+                            "Action": invoke_actions,
+                            "Resource": runtime.agent_runtime_arn,
+                            "Condition": {"StringNotEquals": {"aws:PrincipalArn": allowed_invokers}},
+                        },
+                    ],
+                }
+            ),
+        )
 
         # --- Ingest API (IAM auth) --------------------------------------------
         ingest_fn = lambda_.Function(
@@ -244,7 +297,8 @@ class BufferingStack(Stack):
             },
         )
         queue.grant_send_messages(ingest_fn)
-        jobs_table.grant_read_write_data(ingest_fn)
+        # Conditional insert on submit, point read on status lookup — nothing else.
+        jobs_table.grant(ingest_fn, "dynamodb:PutItem", "dynamodb:GetItem")
 
         http_api = apigwv2.HttpApi(
             self,

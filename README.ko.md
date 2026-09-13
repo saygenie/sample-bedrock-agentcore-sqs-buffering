@@ -185,13 +185,52 @@ Lambda와 AgentCore Runtime이 생성하는 로그 그룹을 포함한 모든 �
 CDK bootstrap 스택(공유 인프라)과 bootstrap 저장소의 ECR 컨테이너 이미지 에셋은
 삭제되지 않으며, 계정에서 CDK를 더 이상 쓰지 않는다면 수동으로 제거한다.
 
+## 권한
+
+**배포**는 CDK가 IAM 역할, ECR 이미지, Lambda, SQS, DynamoDB, AppSync, AgentCore
+리소스를 생성하므로 해당 서비스들과 CloudFormation에 대한 광범위한 관리 권한이 필요하다.
+`./scripts/destroy.sh`는 추가로 `logs:DescribeLogGroups`, `logs:DeleteLogGroup`가 필요하다.
+
+**데모와 테스트 실행**에는 훨씬 적은 권한으로 충분하다. 아래 정책만 가진 역할로 데모
+클라이언트·수용 테스트·`throttle_demo.py`를 실제로 실행해 충분함을 검증했다:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Sid": "SubmitAndPollJobs", "Effect": "Allow",
+      "Action": "execute-api:Invoke",
+      "Resource": "arn:aws:execute-api:us-west-2:<account>:<ingest-api-id>/*" },
+    { "Sid": "ReadQueueDepths", "Effect": "Allow",
+      "Action": "sqs:GetQueueAttributes",
+      "Resource": ["<job-queue-arn>", "<dlq-arn>"] },
+    { "Sid": "ThrottleDemo", "Effect": "Allow",
+      "Action": ["bedrock-agentcore:ListGatewayRateLimits",
+                 "bedrock-agentcore:UpdateGatewayRateLimit"],
+      "Resource": "arn:aws:bedrock-agentcore:us-west-2:<account>:gateway/<gateway-id>" }
+  ]
+}
+```
+
+`execute-api:Invoke`는 IAM 인증을 요구하는 수신 API 호출에 필요하다 — 데모 클라이언트
+(`client/serve.py`가 로컬 자격증명으로 서명하는 경우와 정적 모드에서 직접 서명하는 경우 모두)와
+수용 테스트가 이를 사용한다. 큐 권한은 시나리오 2의 DLQ 깊이 확인용, rate limit 권한은
+시나리오 3 / `throttle_demo.py` 전용이다. 이 정책에는 에이전트 자체에 대한 접근 권한이
+전혀 없다 — 아래 참조.
+
 ## 보안
 
 - 수신 API는 IAM(SigV4)을 요구한다 — 무인증 배포는 없다.
 - AppSync Events API 키는 `connect`/`subscribe`만 허용하며, 발행(publish)은
   소비자 역할만 가진 IAM 권한(`appsync:EventPublish`)을 요구한다.
-- Gateway는 IAM을 요구하고 소비자 역할만 호출할 수 있으며, Runtime은 Gateway 역할과
-  소비자 역할만 호출할 수 있다.
+- **에이전트에 도달하는 유일한 경로는 Gateway이며, 이것이 강제된다.** 소비자 역할에는
+  `bedrock-agentcore:InvokeGateway`만 부여하고 Runtime 직접 호출 권한은 주지 않으며,
+  Runtime의 리소스 정책이 Gateway 역할을 제외한 모든 principal의 `InvokeAgentRuntime`을
+  거부한다. 주의: 이 정책의 Allow 절만으로는 부족하다 — 동일 계정 안에서는 identity 기반
+  허용만으로 통과되므로, 허용만 있는 리소스 정책은 계정 관리자가 우회할 수 있다(실측 확인).
+  이를 막는 것은 명시적 `Deny`다.
+- Gateway 경유와 직접 `InvokeAgentRuntime` 호출을 비교 측정하려면 `-c invokeMode=direct`로
+  배포한다. 이 모드는 의도적으로 우회 경로를 추가하며 기본값이 아니다.
 
 보안 이슈 제보는 [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications)을 참조.
 

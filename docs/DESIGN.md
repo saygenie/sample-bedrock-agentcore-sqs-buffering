@@ -43,6 +43,27 @@
   `GatewayTarget` does not yet have a Runtime target factory** (MCP family only), so it is defined at L1.
 - ✅ With `AgentRuntimeArtifact.from_asset(platform=Platform.LINUX_ARM64)`, the ARM64 image
   build → ECR push → Runtime creation completes in a single `cdk deploy` (143 seconds).
+- ✅ **An allow-only resource policy does not prevent a Gateway bypass.** With a policy whose only
+  statement allowed `InvokeAgentRuntime` to the gateway role, an account administrator still
+  invoked the Runtime directly and streamed a response — standard IAM evaluation, where a
+  same-account identity-based Allow is sufficient on its own and a resource policy only adds
+  permissions. Adding an explicit `Deny` for every principal outside the allow list
+  (`StringNotEquals` on `aws:PrincipalArn`) blocked the same call with `AccessDeniedException`
+  while the Gateway path kept working. The security best practice therefore needs the Deny half
+  to be an enforced property rather than a convention.
+- ✅ `PutResourcePolicy` rejects a statement whose `Resource` is anything other than exactly the
+  one runtime ARN — a `<arn>/*` qualifier variant fails with
+  "Policy statement block must contain exactly one resource ARN".
+- ✅ The caller only needs `bedrock-agentcore:InvokeGateway` on the gateway ARN. Verified by
+  removing the consumer's direct `InvokeAgentRuntime` grant entirely: streaming through the
+  Gateway still passed scenario 1, so the Gateway's outbound call authorizes as the gateway role
+  and no runtime permission is required on the caller.
+- ✅ Least-privilege client policy verified empirically (see README "Permissions"): a temporary
+  role holding only `execute-api:Invoke` on the ingest API, `sqs:GetQueueAttributes` on the
+  queues, and `bedrock-agentcore:{ListGatewayRateLimits,UpdateGatewayRateLimit}` scoped to the
+  gateway ARN could submit jobs, poll results, read DLQ depth and drive the throttle demo. Note
+  the IAM policy simulator accepts non-existent action names, so it cannot be used to validate
+  action spellings — an actual scoped call can.
 
 ## Q2. Whether streaming passes through (§5-2)
 

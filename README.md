@@ -196,13 +196,59 @@ AgentCore Runtime create. The CDK bootstrap stack (shared) and the ECR container
 image assets in the bootstrap repository are not deleted; remove those manually
 if you no longer use CDK in the account.
 
+## Permissions
+
+**Deploying** runs CDK, which creates IAM roles, an ECR image, Lambda functions,
+SQS queues, a DynamoDB table, an AppSync API and AgentCore resources — so the
+deploying identity needs broad administrative access to those services plus
+CloudFormation. `./scripts/destroy.sh` additionally needs
+`logs:DescribeLogGroups` and `logs:DeleteLogGroup`.
+
+**Running the demo and the tests** needs far less. This policy was verified to be
+sufficient by running the demo client, the scenarios and `throttle_demo.py` under
+a role that had nothing else:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Sid": "SubmitAndPollJobs", "Effect": "Allow",
+      "Action": "execute-api:Invoke",
+      "Resource": "arn:aws:execute-api:us-west-2:<account>:<ingest-api-id>/*" },
+    { "Sid": "ReadQueueDepths", "Effect": "Allow",
+      "Action": "sqs:GetQueueAttributes",
+      "Resource": ["<job-queue-arn>", "<dlq-arn>"] },
+    { "Sid": "ThrottleDemo", "Effect": "Allow",
+      "Action": ["bedrock-agentcore:ListGatewayRateLimits",
+                 "bedrock-agentcore:UpdateGatewayRateLimit"],
+      "Resource": "arn:aws:bedrock-agentcore:us-west-2:<account>:gateway/<gateway-id>" }
+  ]
+}
+```
+
+`execute-api:Invoke` is what the IAM-authenticated ingest API requires: the demo
+client needs it (either through `client/serve.py`, which signs with your local
+credentials, or directly in static mode), and so do the acceptance tests. The
+queue permission is only for reading DLQ depth in scenario 2, and the rate-limit
+permissions only for scenario 3 / `throttle_demo.py`. Nothing here grants access
+to the agent itself — see below.
+
 ## Security
 
 - The ingest API requires IAM (SigV4) — no unauthenticated deployment.
 - The AppSync Events API key only permits `connect`/`subscribe`; publishing
   requires IAM (`appsync:EventPublish`), held by the consumer role only.
-- The Gateway requires IAM and only the consumer role may invoke it; the
-  Runtime is invocable only by the Gateway role and the consumer role.
+- **The Gateway is the only way to reach the agent, and that is enforced.** The
+  consumer role is granted `bedrock-agentcore:InvokeGateway` and no direct
+  runtime access, and a resource policy on the Runtime denies
+  `InvokeAgentRuntime` to every principal except the Gateway role. Note that the
+  Allow half of that policy is not sufficient on its own: within a single account
+  an identity-based Allow already suffices, so an account administrator can
+  bypass an allow-only resource policy (measured). The explicit `Deny` is what
+  closes it.
+- Deploy with `-c invokeMode=direct` to compare the Gateway against a direct
+  `InvokeAgentRuntime` baseline; that mode intentionally adds the bypass path and
+  is not the default.
 
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for reporting
 security issues.
