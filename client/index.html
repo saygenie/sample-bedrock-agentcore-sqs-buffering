@@ -412,7 +412,10 @@ function draw() {
   const steps = [];
   for (const [t, d] of deltas) { level += d; peak = Math.max(peak, level); steps.push([t, level]); }
   const yMax = Math.max(1, peak, concurrencyLimit || 0);
-  const stripY = (v) => top + stripH - (v / yMax) * stripH;
+  // Headroom above yMax: the limit line lands at yMax whenever pacing saturates,
+  // and its label sits above the line — without this it clips out of the SVG.
+  const stripPad = 14;
+  const stripY = (v) => top + stripH - (v / yMax) * (stripH - stripPad);
 
   let out = "";
   const step = niceStep(spanMs);
