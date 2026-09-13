@@ -132,7 +132,7 @@
 // ---------- state ----------
 const jobs = new Map();       // jobId -> {row, events:[{t, kind, label}], stats}
 let t0 = null;                // chart epoch (first submit)
-let ws = null, wsReady = false, subs = new Map(), pendingSubs = new Map();
+let ws = null, wsReady = false, wsPromise = null, subs = new Map(), pendingSubs = new Map();
 let dropped = false;
 
 const $ = (id) => document.getElementById(id);
@@ -214,25 +214,34 @@ function connectWs() {
   return new Promise((resolve, reject) => {
     const url = `wss://${$("eventsRealtime").value.trim()}/event/realtime`;
     ws = new WebSocket(url, ["aws-appsync-event-ws", "header-" + b64url(JSON.stringify(authObj()))]);
+    const timer = setTimeout(() => { setConn("connect timeout"); reject(new Error("push channel connect timed out (10s) — check the Events realtime domain and API key")); }, 10000);
     ws.onopen = () => ws.send(JSON.stringify({ type: "connection_init" }));
     ws.onmessage = (m) => {
       const msg = JSON.parse(m.data);
-      if (msg.type === "connection_ack") { wsReady = true; setConn("connected"); resolve(); }
+      if (msg.type === "connection_ack") { clearTimeout(timer); wsReady = true; setConn("connected"); resolve(); }
       else if (msg.type === "subscribe_success") { const cb = pendingSubs.get(msg.id); if (cb) { pendingSubs.delete(msg.id); cb(); } }
-      else if (msg.type === "subscribe_error") { const cb = pendingSubs.get(msg.id); pendingSubs.delete(msg.id); console.error(msg); if (cb) cb(new Error("subscribe failed")); }
+      else if (msg.type === "subscribe_error") { const cb = pendingSubs.get(msg.id); pendingSubs.delete(msg.id); console.error(msg); if (cb) cb(new Error("subscribe failed: " + JSON.stringify(msg.errors || msg))); }
       else if (msg.type === "data") { const jobId = subs.get(msg.id); if (jobId) onEvent(jobId, JSON.parse(msg.event)); }
     };
-    ws.onerror = (e) => { setConn("error"); reject(e); };
-    ws.onclose = () => { wsReady = false; if (!dropped) setConn("closed"); };
+    ws.onerror = () => { clearTimeout(timer); setConn("error"); reject(new Error("push channel connection failed — check the Events realtime domain and API key")); };
+    ws.onclose = () => { wsReady = false; wsPromise = null; if (!dropped) setConn("closed"); };
   });
 }
 function setConn(s) { $("connState").textContent = "push channel: " + s; }
 
+// One shared connection: concurrent subscribe() calls during a burst must not
+// each open (and clobber) their own socket.
+function ensureWs() {
+  if (!wsPromise) wsPromise = connectWs().catch((e) => { wsPromise = null; throw e; });
+  return wsPromise;
+}
+
 async function subscribe(jobId) {
-  if (!wsReady) await connectWs();
+  await ensureWs();
   const id = crypto.randomUUID();
   return new Promise((resolve, reject) => {
-    pendingSubs.set(id, (err) => err ? reject(err) : resolve());
+    const timer = setTimeout(() => { pendingSubs.delete(id); reject(new Error("subscribe timed out (10s)")); }, 10000);
+    pendingSubs.set(id, (err) => { clearTimeout(timer); if (err) reject(err); else resolve(); });
     subs.set(id, jobId);
     ws.send(JSON.stringify({ type: "subscribe", id, channel: `/jobs/${jobId}`, authorization: authObj() }));
   });
@@ -288,8 +297,8 @@ function onEvent(jobId, evt) {
 // ---------- recovery demo ----------
 $("dropBtn").onclick = () => { dropped = true; if (ws) ws.close(); setConn("DROPPED by user — jobs keep running server-side"); $("recoverBtn").disabled = false; };
 $("recoverBtn").onclick = async () => {
-  dropped = false; subs.clear(); pendingSubs.clear();
-  await connectWs();
+  dropped = false; subs.clear(); pendingSubs.clear(); wsPromise = null;
+  await ensureWs();
   for (const [jobId, j] of jobs) {
     if (j.stats.status !== "COMPLETED") await subscribe(jobId).catch(() => {});
     const r = await apiCall("GET", "/jobs/" + jobId, "");
@@ -330,13 +339,14 @@ function shapeSvg(shape, x, y, color) {
 let drawQueued = false;
 function scheduleDraw() { if (!drawQueued) { drawQueued = true; requestAnimationFrame(() => { drawQueued = false; draw(); }); } }
 setInterval(() => { if ([...jobs.values()].some(j => !["COMPLETED","RECOVERED","SUBMIT_FAILED"].includes(j.stats.status))) scheduleDraw(); }, 500);
+window.addEventListener("resize", scheduleDraw);
 
 function draw() {
   const svg = $("chart");
   const rowH = 26, left = 84, right = 20, top = 8, bottom = 26;
   const rows = jobs.size;
   const spanMs = Math.max(5000, ...[...jobs.values()].flatMap(j => j.events.map(e => e.t - t0)), (t0 ? Date.now() - t0 : 0));
-  const width = Math.max(860, Math.min(1600, 860));
+  const width = Math.max(640, (svg.parentElement && svg.parentElement.clientWidth) || 860);
   const height = top + rows * rowH + bottom;
   svg.setAttribute("width", width); svg.setAttribute("height", Math.max(height, 60));
   const x = (t) => left + ((t - t0) / spanMs) * (width - left - right);
